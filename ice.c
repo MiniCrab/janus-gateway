@@ -2136,6 +2136,10 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 					memmove(buf+2, buf, hsize);
 					buf += 2;
 					header = (janus_rtp_header *)buf;
+					if (video && !stream->rtx_nacked[vindex]) {
+						//rtx for padding
+						return;
+					}
 				}
 				/* Check if we need to handle transport wide cc */
 				if(stream->do_transport_wide_cc) {
@@ -2168,17 +2172,25 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 				if(video && stream->rtx_nacked[vindex] != NULL) {
 					/* Check if this packet is a duplicate: can happen with RFC4588 */
 					guint16 seqno = ntohs(header->seq_number);
-					int nstate = GPOINTER_TO_INT(g_hash_table_lookup(stream->rtx_nacked[vindex], GUINT_TO_POINTER(seqno)));
-					if(nstate == 1) {
-						/* Packet was NACKed and this is the first time we receive it: change state to received */
-						JANUS_LOG(LOG_HUGE, "[%"SCNu64"] Received NACKed packet %"SCNu16" (SSRC %"SCNu32", vindex %d)...\n",
-							handle->handle_id, seqno, packet_ssrc, vindex);
-						g_hash_table_insert(stream->rtx_nacked[vindex], GUINT_TO_POINTER(seqno), GUINT_TO_POINTER(2));
-					} else if(nstate == 2) {
-						/* We already received this packet: drop it */
-						JANUS_LOG(LOG_HUGE, "[%"SCNu64"] Detected duplicate packet %"SCNu16" (SSRC %"SCNu32", vindex %d)...\n",
-							handle->handle_id, seqno, packet_ssrc, vindex);
-						return;
+					gpointer value = g_hash_table_lookup(stream->rtx_nacked[vindex], GUINT_TO_POINTER(seqno));
+					if (!value) {
+						//rtx for padding
+						if (rtx)
+							return;
+					}
+					else {
+						int nstate = GPOINTER_TO_INT(value);
+						if(nstate == 1) {
+							/* Packet was NACKed and this is the first time we receive it: change state to received */
+							JANUS_LOG(LOG_HUGE, "[%"SCNu64"] Received NACKed packet %"SCNu16" (SSRC %"SCNu32", vindex %d)...\n",
+								handle->handle_id, seqno, packet_ssrc, vindex);
+							g_hash_table_insert(stream->rtx_nacked[vindex], GUINT_TO_POINTER(seqno), GUINT_TO_POINTER(2));
+						} else if(nstate == 2) {
+							/* We already received this packet: drop it */
+							JANUS_LOG(LOG_HUGE, "[%"SCNu64"] Detected duplicate packet %"SCNu16" (SSRC %"SCNu32", vindex %d)...\n",
+								handle->handle_id, seqno, packet_ssrc, vindex);
+							return;
+						}
 					}
 				}
 				/* Backup the RTP header before passing it to the proper RTP switching context */
@@ -2540,6 +2552,7 @@ static void janus_ice_cb_nice_recv(NiceAgent *agent, guint stream_id, guint comp
 								pkt->encrypted = TRUE;
 							} else {
 								/* We are: overwrite the RTP header (which means we'll need a new SRTP encrypt) */
+								pkt->encrypted = FALSE;
 								janus_rtp_header *header = (janus_rtp_header *)pkt->data;
 								header->type = stream->video_rtx_payload_type;
 								header->ssrc = htonl(stream->video_ssrc_rtx);
